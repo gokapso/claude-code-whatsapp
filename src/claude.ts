@@ -5,6 +5,7 @@ type SessionData = {
   sandboxId: string;
   branchName: string;
   githubRepo: string;
+  isProcessing: boolean;
 };
 
 type PausedSession = {
@@ -28,26 +29,40 @@ export async function getOrCreateClient(
   branchName?: string;
   githubRepo?: string;
   resumed?: boolean;
+  sessionWasReset?: boolean;
 }> {
   // Check active sessions
   if (activeSessions.has(contactId)) {
     const session = activeSessions.get(contactId)!;
-    return {
-      client: session.client,
-      isNew: false,
-      branchName: session.branchName,
-      githubRepo: session.githubRepo,
-    };
+
+    // If client disconnected (e.g., sandbox auto-paused), move to paused sessions
+    if (!session.client.isConnected) {
+      pausedSessions.set(contactId, {
+        sandboxId: session.sandboxId,
+        branchName: session.branchName,
+        githubRepo: session.githubRepo,
+      });
+      activeSessions.delete(contactId);
+      // Fall through to resume logic below
+    } else {
+      return {
+        client: session.client,
+        isNew: false,
+        branchName: session.branchName,
+        githubRepo: session.githubRepo,
+      };
+    }
   }
 
   // Check paused sessions - try to resume
+  let sessionWasReset = false;
   if (pausedSessions.has(contactId)) {
     const paused = pausedSessions.get(contactId)!;
     try {
-      console.log(`🔄 Resuming sandbox ${paused.sandboxId}...`);
       const client = await ClaudeAgentClient.connect(paused.sandboxId, {
         e2bApiKey: process.env.E2B_API_KEY,
         anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+        githubToken: process.env.GITHUB_TOKEN,
         debug: true,
         tools: { type: "preset", preset: "claude_code" },
         systemPrompt: getSystemPrompt(paused.branchName, paused.githubRepo),
@@ -59,6 +74,7 @@ export async function getOrCreateClient(
         sandboxId: paused.sandboxId,
         branchName: paused.branchName,
         githubRepo: paused.githubRepo,
+        isProcessing: false,
       });
       pausedSessions.delete(contactId);
 
@@ -69,12 +85,9 @@ export async function getOrCreateClient(
         githubRepo: paused.githubRepo,
         resumed: true,
       };
-    } catch (e) {
-      console.log(
-        `Failed to resume sandbox ${paused.sandboxId}:`,
-        e instanceof Error ? e.message : e
-      );
+    } catch {
       pausedSessions.delete(contactId);
+      sessionWasReset = true; // Mark that we failed to resume
     }
   }
 
@@ -87,7 +100,7 @@ export async function getOrCreateClient(
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
     githubToken: process.env.GITHUB_TOKEN,
     template: process.env.E2B_TEMPLATE || "claude-whatsapp-server",
-    timeoutMs: 5 * 60 * 1000, // 5 minutes inactivity timeout
+    timeoutMs: 30 * 60 * 1000, // 30 minutes inactivity timeout
     autoPause: true, // Pause on timeout instead of kill
     debug: true,
     tools: { type: "preset", preset: "claude_code" },
@@ -102,9 +115,10 @@ export async function getOrCreateClient(
     sandboxId: client.sandboxId || "",
     githubRepo,
     branchName,
+    isProcessing: false,
   });
 
-  return { client, isNew: true, branchName, githubRepo };
+  return { client, isNew: true, branchName, githubRepo, sessionWasReset };
 }
 
 function generateBranchName(contactId: string): string {
@@ -120,7 +134,10 @@ function getSystemPrompt(branchName: string, githubRepo: string) {
     append: `\n\nYou are helping a user via WhatsApp. Keep responses concise but helpful.
 The GitHub repository ${githubRepo} should be cloned to /home/user/workspace.
 Always work within this directory.
-You are working on branch: ${branchName}. Do not switch or create other branches.`,
+You are working on branch: ${branchName}. Do not switch or create other branches.
+
+When creating PRs or commits, always end the description/body with:
+🤖 Generated with [Claude Code](https://claude.ai/code) on WhatsApp using [Kapso](https://kapso.ai)`,
   };
 }
 
@@ -135,66 +152,77 @@ export async function setupRepository(
     ? `https://${githubToken}@github.com/${githubRepo}.git`
     : `https://github.com/${githubRepo}.git`;
 
-  // Send a message to Claude to clone the repo and create branch
-  return new Promise((resolve, reject) => {
-    let resolved = false;
+  // Clone repo directly using shell commands (not via Claude)
+  const cloneResult = await client.runCommand(
+    `git clone ${cloneUrl} /home/user/workspace`
+  );
 
-    const unsubscribe = client.onMessage((msg) => {
-      if (resolved) return;
+  if (cloneResult.exitCode !== 0) {
+    throw new Error(`Failed to clone repository: ${cloneResult.stderr}`);
+  }
 
-      if (msg.type === "sdk_message") {
-        const data = msg.data as { type: string };
-        if (data.type === "result") {
-          resolved = true;
-          unsubscribe();
-          resolve();
-        }
-      } else if (msg.type === "error") {
-        resolved = true;
-        unsubscribe();
-        reject(new Error(msg.error));
-      }
-    });
+  // Configure git identity for commits
+  await client.runCommand(
+    `cd /home/user/workspace && git config user.name "Claude on Kapso" && git config user.email "claude@kap.so"`
+  );
 
-    client.send({
-      type: "user_message",
-      data: {
-        type: "user",
-        session_id: "setup",
-        parent_tool_use_id: null,
-        message: {
-          role: "user",
-          content: `Clone the repository ${cloneUrl} to /home/user/workspace, then create and checkout a new branch called "${branchName}". Just run the commands, no explanation needed.`,
-        },
-      },
-    });
+  // Create and checkout new branch
+  const branchResult = await client.runCommand(
+    `cd /home/user/workspace && git checkout -b ${branchName}`
+  );
 
-    // Timeout after 2 minutes
-    setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        unsubscribe();
-        reject(new Error("Repository clone timed out"));
-      }
-    }, 120000);
-  });
+  if (branchResult.exitCode !== 0) {
+    throw new Error(`Failed to create branch: ${branchResult.stderr}`);
+  }
 }
 
 type ToolUseInfo = {
   name: string;
-  description?: string;
   input?: Record<string, unknown>;
+  result?: string;
+  isError?: boolean;
 };
+
+/** Interrupt an active session if it's currently processing */
+export function interruptSession(contactId: string): boolean {
+  const session = activeSessions.get(contactId);
+  if (!session || !session.isProcessing) {
+    return false;
+  }
+  session.client.interrupt();
+  return true;
+}
+
+/** Check if a session is currently processing a message */
+export function isSessionProcessing(contactId: string): boolean {
+  const session = activeSessions.get(contactId);
+  return session?.isProcessing ?? false;
+}
 
 export async function sendMessage(
   client: ClaudeAgentClient,
-  sessionId: string,
+  contactId: string,
   message: string,
   onMessage: (text: string) => void,
-  onToolUse?: (tool: ToolUseInfo) => void
+  onToolComplete?: (tool: ToolUseInfo) => void
 ): Promise<void> {
+  // Mark session as processing
+  const session = activeSessions.get(contactId);
+  if (session) {
+    session.isProcessing = true;
+  }
+
+  // Track pending tool calls to match with results
+  const pendingTools = new Map<string, { name: string; input: Record<string, unknown> }>();
+
   return new Promise((resolve, reject) => {
     let resolved = false;
+
+    const cleanup = () => {
+      if (session) {
+        session.isProcessing = false;
+      }
+    };
 
     const unsubscribe = client.onMessage((msg) => {
       if (resolved) return;
@@ -202,12 +230,20 @@ export async function sendMessage(
       if (msg.type === "sdk_message") {
         const data = msg.data as {
           type: string;
+          subtype?: string;
+          tool_use_id?: string;
+          content?: string | Array<{ type: string; text?: string }>;
           message?: {
+            role?: string;
             content: Array<{
               type?: string;
               text?: string;
               name?: string;
               input?: Record<string, unknown>;
+              id?: string; // tool_use blocks use "id"
+              tool_use_id?: string; // tool_result blocks use "tool_use_id"
+              content?: string;
+              is_error?: boolean;
             }>;
           };
         };
@@ -216,23 +252,40 @@ export async function sendMessage(
           for (const block of data.message.content) {
             if (block.text) {
               onMessage(block.text);
-            } else if (block.type === "tool_use" && block.name && onToolUse) {
-              const input = block.input || {};
-              const description =
-                (input.description as string) ||
-                (input.command as string) ||
-                (input.file_path as string);
-              onToolUse({ name: block.name, description, input });
+            } else if (block.type === "tool_use" && block.name && block.id) {
+              // Store pending tool call
+              pendingTools.set(block.id, {
+                name: block.name,
+                input: block.input || {},
+              });
+            }
+          }
+        } else if (data.type === "user" && data.message?.content && onToolComplete) {
+          // Handle tool results
+          for (const block of data.message.content) {
+            if (block.type === "tool_result" && block.tool_use_id) {
+              const pendingTool = pendingTools.get(block.tool_use_id);
+              if (pendingTool) {
+                pendingTools.delete(block.tool_use_id);
+                onToolComplete({
+                  name: pendingTool.name,
+                  input: pendingTool.input,
+                  result: typeof block.content === "string" ? block.content : "",
+                  isError: block.is_error,
+                });
+              }
             }
           }
         } else if (data.type === "result") {
           resolved = true;
           unsubscribe();
+          cleanup();
           resolve();
         }
       } else if (msg.type === "error") {
         resolved = true;
         unsubscribe();
+        cleanup();
         reject(new Error(msg.error));
       }
     });
@@ -241,7 +294,7 @@ export async function sendMessage(
       type: "user_message",
       data: {
         type: "user",
-        session_id: sessionId,
+        session_id: contactId,
         parent_tool_use_id: null,
         message: {
           role: "user",
@@ -255,6 +308,7 @@ export async function sendMessage(
       if (!resolved) {
         resolved = true;
         unsubscribe();
+        cleanup();
         reject(new Error("Request timed out"));
       }
     }, 600000);
@@ -265,8 +319,6 @@ export async function pauseClient(contactId: string): Promise<void> {
   const session = activeSessions.get(contactId);
   if (!session) return;
 
-  console.log(`⏸️ Pausing session for ${contactId}...`);
-
   try {
     await session.client.pause();
     pausedSessions.set(contactId, {
@@ -274,8 +326,8 @@ export async function pauseClient(contactId: string): Promise<void> {
       branchName: session.branchName,
       githubRepo: session.githubRepo,
     });
-  } catch (e) {
-    console.error(`Failed to pause session:`, e);
+  } catch {
+    // Ignore pause errors
   }
 
   activeSessions.delete(contactId);

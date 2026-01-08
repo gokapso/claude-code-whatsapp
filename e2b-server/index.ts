@@ -24,8 +24,14 @@ const messageQueue: SDKUserMessage[] = [];
 // Stream reference for interrupts
 let activeStream: ReturnType<typeof query> | null = null;
 
+// AbortController for cancelling the current query
+let queryAbortController: AbortController | null = null;
+
 // Stored query configuration
 let queryConfig: QueryConfig = {};
+
+// Server instance (mutable for restart)
+let server: ReturnType<typeof Bun.serve> | null = null;
 
 // Create an async generator that yields messages from the queue
 async function* generateMessages() {
@@ -75,12 +81,17 @@ async function branchProtectionHook(
 
 // Process messages from the SDK and send to WebSocket client
 async function processMessages() {
+  // Create new AbortController for this session
+  queryAbortController = new AbortController();
+  const currentController = queryAbortController;
+
   try {
     const options: Options = {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       settingSources: ["project"],
       cwd: workspaceDirectory,
+      abortController: currentController,
       stderr: (data) => {
         if (activeConnection) {
           const output: WSOutputMessage = {
@@ -99,21 +110,19 @@ async function processMessages() {
         ],
       },
       ...queryConfig,
-      ...((queryConfig.anthropicApiKey || queryConfig.githubToken) && {
-        env: {
-          PATH: process.env.PATH,
-          ...(queryConfig.anthropicApiKey && {
-            ANTHROPIC_API_KEY: queryConfig.anthropicApiKey,
-          }),
-          ...(queryConfig.githubToken && {
-            GH_TOKEN: queryConfig.githubToken,
-            GITHUB_TOKEN: queryConfig.githubToken,
-          }),
-        },
-      }),
+      // Spread sandbox env vars and add our tokens on top
+      env: {
+        ...process.env,
+        ...(queryConfig.anthropicApiKey && {
+          ANTHROPIC_API_KEY: queryConfig.anthropicApiKey,
+        }),
+        ...(queryConfig.githubToken && {
+          GH_TOKEN: queryConfig.githubToken,
+          GITHUB_TOKEN: queryConfig.githubToken,
+        }),
+      },
     };
 
-    console.info("Starting query with options", options);
 
     activeStream = query({
       prompt: generateMessages(),
@@ -121,6 +130,9 @@ async function processMessages() {
     });
 
     for await (const message of activeStream) {
+      if (currentController.signal.aborted) {
+        break;
+      }
       if (activeConnection) {
         const output: WSOutputMessage = {
           type: "sdk_message",
@@ -130,7 +142,9 @@ async function processMessages() {
       }
     }
   } catch (error) {
-    console.error("Error processing messages:", error);
+    if (error instanceof Error && error.name === "AbortError") {
+      return;
+    }
     if (activeConnection) {
       const output: WSOutputMessage = {
         type: "error",
@@ -142,7 +156,8 @@ async function processMessages() {
 }
 
 // Create WebSocket server
-const server = Bun.serve({
+server = Bun.serve({
+  hostname: "0.0.0.0",  // Bind to all interfaces (required for E2B)
   port: SERVER_PORT,
   fetch(req, server) {
     const url = new URL(req.url);
@@ -153,7 +168,7 @@ const server = Bun.serve({
         .json()
         .then((config) => {
           queryConfig = config as QueryConfig;
-          return Response.json({ success: true, config: queryConfig });
+          return Response.json({ success: true });
         })
         .catch(() => {
           return Response.json({ error: "Invalid JSON" }, { status: 400 });
@@ -165,32 +180,46 @@ const server = Bun.serve({
       return Response.json({ config: queryConfig });
     }
 
+    // Restart endpoint - resets server state after pause/resume
+    if (url.pathname === "/restart" && req.method === "POST") {
+      if (queryAbortController) {
+        queryAbortController.abort();
+        queryAbortController = null;
+      }
+      if (activeConnection) {
+        try { activeConnection.close(); } catch {}
+        activeConnection = null;
+      }
+      activeStream = null;
+      messageQueue.length = 0;
+      return Response.json({ success: true });
+    }
+
     // WebSocket endpoint
     if (url.pathname === "/ws") {
-      if (server.upgrade(req)) return;
+      if (server!.upgrade(req)) return;
     }
 
     return new Response("Not Found", { status: 404 });
   },
 
   websocket: {
+    // Disable idle timeout - after pause/resume, time jumps can trigger it immediately
+    idleTimeout: 0,
+
     open(ws) {
+      if (queryAbortController) {
+        queryAbortController.abort();
+        queryAbortController = null;
+      }
       if (activeConnection) {
-        const output: WSOutputMessage = {
-          type: "error",
-          error: "Server already has an active connection",
-        };
-        ws.send(JSON.stringify(output));
-        ws.close();
-        return;
+        try { activeConnection.close(); } catch {}
       }
-
       activeConnection = ws;
+      activeStream = null;
+      messageQueue.length = 0;
 
-      // Start processing messages when first connection is made
-      if (!activeStream) {
-        processMessages();
-      }
+      processMessages();
 
       const output: WSOutputMessage = { type: "connected" };
       ws.send(JSON.stringify(output));
@@ -211,6 +240,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`🚀 WebSocket server running on http://localhost:${server.port}`);
-console.log(`   Config endpoint: http://localhost:${server.port}/config`);
-console.log(`   WebSocket endpoint: ws://localhost:${server.port}/ws`);
+console.log(`Server running on port ${server.port}`);

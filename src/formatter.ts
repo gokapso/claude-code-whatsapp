@@ -55,6 +55,17 @@ export class MessageBuffer {
     }
   }
 
+  /** Get buffered content and clear without sending */
+  take(): string {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    const content = this.buffer.join("\n").trim();
+    this.buffer = [];
+    return content;
+  }
+
   private splitIntoChunks(text: string): string[] {
     if (text.length <= WHATSAPP_MAX_LENGTH) {
       return [text];

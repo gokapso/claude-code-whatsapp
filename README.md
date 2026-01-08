@@ -23,7 +23,7 @@
 | **Anthropic** | [console.anthropic.com](https://console.anthropic.com) | API key |
 | **E2B** | [e2b.dev](https://e2b.dev) | API key |
 | **Kapso** | [kapso.ai](https://kapso.ai) | API key + WhatsApp number (connect your own or use sandbox) |
-| **GitHub** | [github.com/settings/tokens](https://github.com/settings/tokens) | Fine-grained PAT |
+| **GitHub** | [github.com/settings/personal-access-tokens](https://github.com/settings/personal-access-tokens) | Fine-grained PAT |
 
 ## GitHub token permissions
 
@@ -71,19 +71,15 @@ PORT=3001
 
 ### 3. Build E2B template
 
-The Claude Agent runs inside an E2B sandbox. Build the template once:
-
 ```bash
-# Push your code to GitHub first (template clones from GitHub)
-git add . && git commit -m "Initial" && git push
-
-# Build template
 npm run build:e2b
 ```
 
-For private repos:
+This creates your sandbox template using code from the public repo.
+
+**Custom modifications:** If you've modified `e2b-server/`, push to your own repo first:
 ```bash
-E2B_GITHUB_TOKEN=github_pat_xxx npm run build:e2b
+E2B_GITHUB_REPO=youruser/yourrepo npm run build:e2b
 ```
 
 ### 4. Setup Kapso
@@ -132,16 +128,16 @@ Update your Kapso webhook URL with the tunnel URL.
 | `npm run build:e2b` | Build E2B sandbox template |
 | `npm run typecheck` | Type check without emitting |
 
-## WhatsApp commands
+## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/compact` | Compact conversation history |
-| `/clear` | Clear conversation |
-| `/status` | Show Claude status |
-| `/help` | Show help |
 | `/info` | Show session info (repo, branch, sandbox) |
 | `/reset` | End current session |
+| `/compact` | Compact conversation history (Claude Code) |
+| `/clear` | Clear conversation (Claude Code) |
+| `/status` | Show Claude status (Claude Code) |
+| `/help` | Show help (Claude Code) |
 
 ## Architecture
 
@@ -181,7 +177,7 @@ WhatsApp → Kapso → Node.js Server → E2B Sandbox
 6. Repo is cloned, new branch created
 7. Claude processes messages, can edit files, run commands
 8. User can create PRs, push changes
-9. After 5 min inactivity, sandbox pauses (can resume later)
+9. After 30 min inactivity, sandbox pauses
 
 ## Credits
 

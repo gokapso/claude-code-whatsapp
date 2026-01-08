@@ -13,6 +13,7 @@ import {
   getSessionInfo,
   hasActiveClient,
   hasPausedSession,
+  interruptSession,
 } from "./claude.js";
 import { fetchAccessibleRepos, type GitHubRepo } from "./github.js";
 import { MessageBuffer } from "./formatter.js";
@@ -27,60 +28,62 @@ type ToolInput = {
   content?: string;
 };
 
+type ToolInfo = {
+  name: string;
+  input?: Record<string, unknown>;
+  result?: string;
+  isError?: boolean;
+};
+
 function truncate(str: string, maxLines: number, maxChars: number): string {
   const lines = str.split("\n").slice(0, maxLines);
   const result = lines.join("\n");
   return result.length > maxChars ? result.slice(0, maxChars) + "..." : result;
 }
 
-function formatDiffLines(str: string, prefix: string, maxLines = 6): string {
-  return str
-    .split("\n")
-    .slice(0, maxLines)
-    .map((line) => `${prefix} ${line}`)
-    .join("\n");
-}
-
-function formatToolMessage(name: string, input: ToolInput): string {
+function formatToolMessage(tool: ToolInfo): string {
+  const input = (tool.input || {}) as ToolInput;
+  const result = tool.result ? truncate(tool.result, 8, 400) : "";
   const divider = "──────────";
 
-  switch (name) {
+  switch (tool.name) {
     case "Edit": {
       const file = input.file_path?.split("/").pop() || "file";
-      const oldLines = input.old_string
-        ? formatDiffLines(truncate(input.old_string, 6, 200), "-")
+      const oldCode = input.old_string
+        ? "```\n- " + truncate(input.old_string, 6, 200).split("\n").join("\n- ") + "\n```"
         : "";
-      const newLines = input.new_string
-        ? formatDiffLines(truncate(input.new_string, 6, 200), "+")
+      const newCode = input.new_string
+        ? "```\n+ " + truncate(input.new_string, 6, 200).split("\n").join("\n+ ") + "\n```"
         : "";
-      return `📝 Edit\n${divider}\n${file}\n\n${oldLines}\n\n${newLines}`;
+      return `📝 Edit \`${file}\`\n${divider}\n${oldCode}\n${newCode}`;
     }
 
     case "Write": {
       const file = input.file_path?.split("/").pop() || "file";
-      const preview = input.content ? truncate(input.content, 4, 150) : "";
-      return `📝 Write\n${divider}\n${file}\n\n${preview}`;
+      return `📝 Write \`${file}\`${result ? `\n${divider}\n${result}` : ""}`;
     }
 
     case "Read": {
       const file = input.file_path?.split("/").pop() || "file";
-      return `📖 Read\n${divider}\n${file}`;
+      // Don't show result for Read (too long)
+      return `📖 Read \`${file}\``;
     }
 
     case "Bash": {
-      const cmd = input.command ? truncate(input.command, 3, 100) : "";
-      return `⚡ Bash\n${divider}\n${cmd}`;
+      const cmd = input.command ? truncate(input.command, 1, 60) : "";
+      const output = result ? `\n${divider}\n\`\`\`\n${result}\n\`\`\`` : "";
+      return `⚡ Bash \`${cmd}\`${output}`;
     }
 
     case "Glob":
     case "Grep": {
       const pattern = input.pattern || "";
-      const path = input.path ? ` in ${input.path}` : "";
-      return `🔍 ${name}\n${divider}\n"${pattern}"${path}`;
+      const path = input.path ? ` in \`${input.path}\`` : "";
+      return `🔍 ${tool.name} \`${pattern}\`${path}${result ? `\n${divider}\n${result}` : ""}`;
     }
 
     default: {
-      return `🔧 ${name}`;
+      return `🔧 ${tool.name}${result ? `\n${divider}\n${result}` : ""}`;
     }
   }
 }
@@ -88,6 +91,12 @@ function formatToolMessage(name: string, input: ToolInput): string {
 const BUTTON_CONTINUE = "continue_session";
 const BUTTON_RESET = "reset_session";
 const REPO_PREFIX = "repo:";
+
+// Pending repo selections (user selected repo but hasn't sent task yet)
+const pendingRepos = new Map<string, string>();
+
+// Sessions currently being set up (prevents race conditions)
+const settingUpSessions = new Set<string>();
 
 function isRepoSelection(buttonId: string | undefined): boolean {
   return buttonId?.startsWith(REPO_PREFIX) || false;
@@ -152,17 +161,52 @@ async function showWelcomeWithRepos(to: string, repos: GitHubRepo[]): Promise<vo
   });
 }
 
-async function startSession(to: string, githubRepo: string): Promise<void> {
-  await sendWhatsAppMessage(to, "Setting up your workspace...");
+async function startSessionWithTask(
+  to: string,
+  githubRepo: string,
+  task: string
+): Promise<void> {
+  settingUpSessions.add(to);
 
-  const { client, branchName } = await getOrCreateClient(to, githubRepo);
+  try {
+    await sendWhatsAppMessage(to, "Setting up your workspace...");
 
-  if (branchName) {
-    await setupRepository(client, branchName, githubRepo);
-    await sendWhatsAppMessage(
-      to,
-      `Ready ✅\n──────────\n📁 ${githubRepo}\n🌿 ${branchName}\n\nWhat do you want to work on?`
-    );
+    const { client, branchName } = await getOrCreateClient(to, githubRepo);
+
+    if (branchName) {
+      await setupRepository(client, branchName, githubRepo);
+      await sendWhatsAppMessage(
+        to,
+        `Ready ✅\n──────────\n📁 ${githubRepo}\n🔀 ${branchName}`
+      );
+
+      // Create message buffer for batching responses
+      const buffer = new MessageBuffer(async (text) => {
+        await sendWhatsAppMessage(to, text);
+      });
+
+      // Send the task to Claude
+      await sendMessage(
+        client,
+        to,
+        task,
+        (responseText) => {
+          buffer.append(responseText);
+        },
+        async (tool) => {
+          // Combine any pending text with tool message
+          const pendingText = buffer.take();
+          const toolMessage = formatToolMessage(tool);
+          const message = pendingText ? `${pendingText}\n${toolMessage}` : toolMessage;
+          await sendWhatsAppMessage(to, message);
+        }
+      );
+
+      await buffer.flush();
+      await client.setTimeout(30 * 60 * 1000); // 30 minutes
+    }
+  } finally {
+    settingUpSessions.delete(to);
   }
 }
 
@@ -175,6 +219,7 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
   // Handle /reset command or reset button
   if (text.trim().toLowerCase() === "/reset" || buttonId === BUTTON_RESET) {
     await killClient(from);
+    pendingRepos.delete(from);
     await sendWhatsAppMessage(
       from,
       "Session ended ✅\n──────────\nYour workspace has been closed.\n\nSend any message to start a new session."
@@ -196,11 +241,23 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
     return;
   }
 
-  // Handle repo selection from buttons/list
+  // Handle repo selection from buttons/list - store and ask for task
   if (isRepoSelection(buttonId)) {
     const selectedRepo = getRepoFromButtonId(buttonId!);
+    pendingRepos.set(from, selectedRepo);
+    await sendWhatsAppMessage(
+      from,
+      `📁 ${selectedRepo}\n\nWhat do you want to work on?`
+    );
+    return;
+  }
+
+  // Handle pending repo - user sent their task
+  if (pendingRepos.has(from)) {
+    const githubRepo = pendingRepos.get(from)!;
+    pendingRepos.delete(from);
     try {
-      await startSession(from, selectedRepo);
+      await startSessionWithTask(from, githubRepo, text);
     } catch (error) {
       console.error("Error starting session:", error);
       const errorMessage =
@@ -218,13 +275,18 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
     const info = getSessionInfo(from);
     await sendInteractiveButtons(from, {
       header: "Welcome back",
-      body: `Your session is paused.\n\n📁 ${info?.githubRepo}\n🌿 ${info?.branchName || "unknown"}`,
+      body: `Your session is paused.\n\n📁 ${info?.githubRepo}\n🔀 ${info?.branchName || "unknown"}`,
       footer: "Powered by Kapso",
       buttons: [
         { id: BUTTON_CONTINUE, title: "Continue" },
         { id: BUTTON_RESET, title: "Start fresh" },
       ],
     });
+    return;
+  }
+
+  // Skip if session is being set up (prevents race condition)
+  if (settingUpSessions.has(from)) {
     return;
   }
 
@@ -250,10 +312,18 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
     const info = getSessionInfo(from);
     const githubRepo = info?.githubRepo || "";
 
-    const { client, isNew, branchName, resumed } = await getOrCreateClient(
+    const { client, isNew, branchName, resumed, sessionWasReset } = await getOrCreateClient(
       from,
       githubRepo
     );
+
+    // Notify user if session was reset (failed to resume paused sandbox)
+    if (sessionWasReset) {
+      await sendWhatsAppMessage(
+        from,
+        "⚠️ Previous session expired. Starting fresh..."
+      );
+    }
 
     // Setup repository if new session (shouldn't happen here, but handle it)
     if (isNew && branchName) {
@@ -261,7 +331,7 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
       await setupRepository(client, branchName, githubRepo);
       await sendWhatsAppMessage(
         from,
-        `Ready ✅\n──────────\n📁 ${githubRepo}\n🌿 ${branchName}\n\nWhat do you want to work on?`
+        `Ready ✅\n──────────\n📁 ${githubRepo}\n🔀 ${branchName}\n\nWhat do you want to work on?`
       );
       return;
     }
@@ -275,6 +345,9 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
     if (buttonId === BUTTON_CONTINUE) {
       return;
     }
+
+    // Interrupt any ongoing processing before sending new message
+    interruptSession(from);
 
     // Create message buffer for batching responses
     const buffer = new MessageBuffer(async (text) => {
@@ -290,7 +363,10 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
         buffer.append(responseText);
       },
       async (tool) => {
-        const message = formatToolMessage(tool.name, tool.input as ToolInput);
+        // Combine any pending text with tool message
+        const pendingText = buffer.take();
+        const toolMessage = formatToolMessage(tool);
+        const message = pendingText ? `${pendingText}\n${toolMessage}` : toolMessage;
         await sendWhatsAppMessage(from, message);
       }
     );
@@ -299,13 +375,9 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
     await buffer.flush();
 
     // Reset inactivity timeout (5 minutes from now)
-    await client.setTimeout(5 * 60 * 1000);
+    await client.setTimeout(30 * 60 * 1000); // 30 minutes
   } catch (error) {
-    console.error(`\n========== ERROR ==========`);
-    console.error(`Error handling message from ${from}:`);
-    console.error(error);
-    console.error(`===========================\n`);
-
+    console.error("Error handling message:", error);
     await killClient(from);
 
     const errorMessage =
@@ -319,6 +391,6 @@ export async function handleMessage(message: ParsedMessage): Promise<void> {
 
 export function startCleanupInterval(intervalMs = 30 * 60 * 1000): void {
   setInterval(async () => {
-    console.log("Running client cleanup...");
+    // Placeholder for cleanup logic
   }, intervalMs);
 }

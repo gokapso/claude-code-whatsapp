@@ -225,7 +225,7 @@ export type KapsoWebhookPayload = {
 };
 
 type KapsoMessage = {
-  from: string;
+  from?: string;
   id: string;
   timestamp: string;
   type: "text" | "image" | "audio" | "video" | "document" | "location" | "interactive" | "button";
@@ -239,6 +239,11 @@ type KapsoMessage = {
   kapso?: {
     direction: "inbound" | "outbound";
     content?: string;
+    phone_number?: string;
+    phone_number_id?: string;
+    status?: string;
+    processing_status?: string;
+    origin?: string;
   };
 };
 
@@ -258,15 +263,19 @@ export type ParsedMessage = {
 function parseMessage(msg: KapsoMessage): ParsedMessage | null {
   if (msg.kapso?.direction !== "inbound") return null;
 
+  // Get phone number from either format
+  const from = msg.from || msg.kapso?.phone_number;
+  if (!from) return null;
+
   // Text message
   if (msg.type === "text" && msg.text?.body) {
-    return { from: msg.from, text: msg.text.body, messageId: msg.id };
+    return { from, text: msg.text.body, messageId: msg.id };
   }
 
   // Interactive button reply
   if (msg.type === "interactive" && msg.interactive?.button_reply) {
     return {
-      from: msg.from,
+      from,
       text: msg.interactive.button_reply.title,
       messageId: msg.id,
       buttonId: msg.interactive.button_reply.id,
@@ -276,7 +285,7 @@ function parseMessage(msg: KapsoMessage): ParsedMessage | null {
   // Interactive list reply
   if (msg.type === "interactive" && msg.interactive?.list_reply) {
     return {
-      from: msg.from,
+      from,
       text: msg.interactive.list_reply.title,
       messageId: msg.id,
       buttonId: msg.interactive.list_reply.id,
@@ -286,7 +295,7 @@ function parseMessage(msg: KapsoMessage): ParsedMessage | null {
   // Button reply (older format)
   if (msg.type === "button" && msg.button) {
     return {
-      from: msg.from,
+      from,
       text: msg.button.text,
       messageId: msg.id,
       buttonId: msg.button.payload,

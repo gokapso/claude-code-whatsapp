@@ -81,34 +81,16 @@ app.post("/webhook", (req, res) => {
 const port = process.env.PORT ? parseInt(process.env.PORT) : 3001;
 
 app.listen(port, () => {
-  console.log(`Claude Code WhatsApp server running on port ${port}`);
-  console.log(`Webhook endpoint: POST /webhook`);
-  console.log(`Health check: GET /health`);
+  console.log(`Server running on port ${port}`);
 });
 
 // Start periodic cleanup
 startCleanupInterval();
 
 // Handle graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("Received SIGTERM, shutting down...");
-  process.exit(0);
-});
-
-process.on("SIGINT", () => {
-  console.log("Received SIGINT, shutting down...");
-  process.exit(0);
-});
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
 
 // Prevent crashes from unhandled errors
-process.on("uncaughtException", (error) => {
-  console.error("\n========== UNCAUGHT EXCEPTION ==========");
-  console.error(error);
-  console.error("=========================================\n");
-});
-
-process.on("unhandledRejection", (reason) => {
-  console.error("\n========== UNHANDLED REJECTION ==========");
-  console.error(reason);
-  console.error("==========================================\n");
-});
+process.on("uncaughtException", (error) => console.error("Uncaught:", error));
+process.on("unhandledRejection", (reason) => console.error("Unhandled:", reason));
