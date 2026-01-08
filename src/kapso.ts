@@ -1,7 +1,7 @@
 import crypto from "crypto";
+import { WhatsAppClient } from "@kapso/whatsapp-cloud-api";
 
 const KAPSO_API_BASE = "https://api.kapso.ai";
-const WHATSAPP_API_BASE = "https://api.kapso.ai/meta/whatsapp/v24.0";
 
 type KapsoConfig = {
   apiKey: string;
@@ -10,38 +10,89 @@ type KapsoConfig = {
 };
 
 let config: KapsoConfig;
+let whatsapp: WhatsAppClient;
 
 export function initKapso(cfg: KapsoConfig) {
   config = cfg;
+  whatsapp = new WhatsAppClient({
+    baseUrl: "https://api.kapso.ai/meta/whatsapp",
+    kapsoApiKey: cfg.apiKey,
+  });
 }
 
 // WhatsApp messaging
 
 export async function sendWhatsAppMessage(to: string, text: string) {
-  const response = await fetch(
-    `${WHATSAPP_API_BASE}/${config.phoneNumberId}/messages`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-API-Key": config.apiKey,
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "text",
-        text: { body: text },
-      }),
-    }
-  );
+  return whatsapp.messages.sendText({
+    phoneNumberId: config.phoneNumberId,
+    to,
+    body: text,
+  });
+}
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to send WhatsApp message: ${error}`);
+export async function markAsReadWithTyping(messageId: string) {
+  return whatsapp.messages.markRead({
+    phoneNumberId: config.phoneNumberId,
+    messageId,
+    typingIndicator: { type: "text" },
+  });
+}
+
+type InteractiveButton = {
+  id: string;
+  title: string;
+};
+
+export async function sendInteractiveButtons(
+  to: string,
+  options: {
+    header?: string;
+    body: string;
+    footer?: string;
+    buttons: InteractiveButton[];
   }
+) {
+  return whatsapp.messages.sendInteractiveButtons({
+    phoneNumberId: config.phoneNumberId,
+    to,
+    header: options.header ? { type: "text", text: options.header } : undefined,
+    bodyText: options.body,
+    footerText: options.footer,
+    buttons: options.buttons,
+  });
+}
 
-  return response.json();
+type ListRow = {
+  id: string;
+  title: string;
+  description?: string;
+};
+
+export async function sendInteractiveList(
+  to: string,
+  options: {
+    header?: string;
+    body: string;
+    footer?: string;
+    buttonText: string;
+    sectionTitle?: string;
+    rows: ListRow[];
+  }
+) {
+  return whatsapp.messages.sendInteractiveList({
+    phoneNumberId: config.phoneNumberId,
+    to,
+    header: options.header ? { type: "text", text: options.header } : undefined,
+    bodyText: options.body,
+    footerText: options.footer,
+    buttonText: options.buttonText,
+    sections: [
+      {
+        title: options.sectionTitle,
+        rows: options.rows,
+      },
+    ],
+  });
 }
 
 // Webhook signature verification
@@ -177,8 +228,14 @@ type KapsoMessage = {
   from: string;
   id: string;
   timestamp: string;
-  type: "text" | "image" | "audio" | "video" | "document" | "location";
+  type: "text" | "image" | "audio" | "video" | "document" | "location" | "interactive" | "button";
   text?: { body: string };
+  interactive?: {
+    type: "button_reply" | "list_reply";
+    button_reply?: { id: string; title: string };
+    list_reply?: { id: string; title: string };
+  };
+  button?: { payload: string; text: string };
   kapso?: {
     direction: "inbound" | "outbound";
     content?: string;
@@ -191,8 +248,56 @@ type KapsoConversation = {
   phone_number: string;
 };
 
-export function parseWebhookPayload(payload: KapsoWebhookPayload) {
-  const messages: Array<{ from: string; text: string; messageId: string }> = [];
+export type ParsedMessage = {
+  from: string;
+  text: string;
+  messageId: string;
+  buttonId?: string;
+};
+
+function parseMessage(msg: KapsoMessage): ParsedMessage | null {
+  if (msg.kapso?.direction !== "inbound") return null;
+
+  // Text message
+  if (msg.type === "text" && msg.text?.body) {
+    return { from: msg.from, text: msg.text.body, messageId: msg.id };
+  }
+
+  // Interactive button reply
+  if (msg.type === "interactive" && msg.interactive?.button_reply) {
+    return {
+      from: msg.from,
+      text: msg.interactive.button_reply.title,
+      messageId: msg.id,
+      buttonId: msg.interactive.button_reply.id,
+    };
+  }
+
+  // Interactive list reply
+  if (msg.type === "interactive" && msg.interactive?.list_reply) {
+    return {
+      from: msg.from,
+      text: msg.interactive.list_reply.title,
+      messageId: msg.id,
+      buttonId: msg.interactive.list_reply.id,
+    };
+  }
+
+  // Button reply (older format)
+  if (msg.type === "button" && msg.button) {
+    return {
+      from: msg.from,
+      text: msg.button.text,
+      messageId: msg.id,
+      buttonId: msg.button.payload,
+    };
+  }
+
+  return null;
+}
+
+export function parseWebhookPayload(payload: KapsoWebhookPayload): ParsedMessage[] {
+  const messages: ParsedMessage[] = [];
 
   // Handle batched format
   if (payload.type && payload.data) {
@@ -200,28 +305,16 @@ export function parseWebhookPayload(payload: KapsoWebhookPayload) {
       return messages;
     }
     for (const item of payload.data) {
-      const msg = item.message;
-      if (msg.type === "text" && msg.text?.body && msg.kapso?.direction === "inbound") {
-        messages.push({
-          from: msg.from,
-          text: msg.text.body,
-          messageId: msg.id,
-        });
-      }
+      const parsed = parseMessage(item.message);
+      if (parsed) messages.push(parsed);
     }
     return messages;
   }
 
   // Handle single message format
   if (payload.message) {
-    const msg = payload.message;
-    if (msg.type === "text" && msg.text?.body && msg.kapso?.direction === "inbound") {
-      messages.push({
-        from: msg.from,
-        text: msg.text.body,
-        messageId: msg.id,
-      });
-    }
+    const parsed = parseMessage(payload.message);
+    if (parsed) messages.push(parsed);
   }
 
   return messages;

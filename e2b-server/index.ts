@@ -4,6 +4,8 @@ import {
   query,
   type Options,
   type SDKUserMessage,
+  type PreToolUseHookInput,
+  type HookJSONOutput,
 } from "@anthropic-ai/claude-agent-sdk";
 import { type ServerWebSocket } from "bun";
 
@@ -39,6 +41,38 @@ async function* generateMessages() {
   }
 }
 
+// Check if a command tries to change/create/delete branches
+function isGitBranchOperation(command: string): boolean {
+  // Block: git checkout <branch>, git checkout -b, git switch, git branch -d/-D/create
+  // Allow: git checkout -- <file> (restore file)
+  const patterns = [
+    /\bgit\s+checkout\s+(?!--\s)/, // git checkout <anything> except -- (file restore)
+    /\bgit\s+switch\b/, // any git switch
+    /\bgit\s+branch\s+(-[dDmM]|[^-])/, // git branch -d/-D/-m/-M or git branch <name>
+  ];
+  return patterns.some((p) => p.test(command));
+}
+
+// PreToolUse hook to block git branch operations
+async function branchProtectionHook(
+  input: PreToolUseHookInput,
+  _toolUseId: string | undefined,
+  _options: { signal: AbortSignal }
+): Promise<HookJSONOutput> {
+  const toolInput = input.tool_input as { command?: string };
+  const command = toolInput.command || "";
+
+  if (isGitBranchOperation(command)) {
+    const branch = queryConfig.sessionBranch || "session branch";
+    return {
+      continue: false,
+      reason: `Branch operations are disabled. Work on ${branch} only.`,
+    };
+  }
+
+  return { continue: true };
+}
+
 // Process messages from the SDK and send to WebSocket client
 async function processMessages() {
   try {
@@ -56,11 +90,25 @@ async function processMessages() {
           activeConnection.send(JSON.stringify(output));
         }
       },
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [branchProtectionHook],
+          },
+        ],
+      },
       ...queryConfig,
-      ...(queryConfig.anthropicApiKey && {
+      ...((queryConfig.anthropicApiKey || queryConfig.githubToken) && {
         env: {
           PATH: process.env.PATH,
-          ANTHROPIC_API_KEY: queryConfig.anthropicApiKey,
+          ...(queryConfig.anthropicApiKey && {
+            ANTHROPIC_API_KEY: queryConfig.anthropicApiKey,
+          }),
+          ...(queryConfig.githubToken && {
+            GH_TOKEN: queryConfig.githubToken,
+            GITHUB_TOKEN: queryConfig.githubToken,
+          }),
         },
       }),
     };

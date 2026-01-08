@@ -1,7 +1,7 @@
 {
   "name": "claude-code-whatsapp",
   "version": "1.0.0",
-  "description": "Run Claude Code via WhatsApp using Kapso and @dzhng/claude-agent",
+  "description": "Run Claude Code via WhatsApp using Kapso and E2B sandboxes",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -12,15 +12,16 @@
     "build:e2b": "bun run e2b-server/build.ts"
   },
   "dependencies": {
-    "@dzhng/claude-agent": "^0.2.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.1.44",
+    "@kapso/whatsapp-cloud-api": "^0.1.1",
     "dotenv": "^17.2.3",
+    "e2b": "^2.7.0",
     "express": "^5.2.1"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/express": "^5.0.6",
     "@types/node": "^22.19.3",
-    "e2b": "^2.7.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },

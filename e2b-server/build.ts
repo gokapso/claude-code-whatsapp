@@ -25,7 +25,10 @@ const template = Template()
   .fromBunImage("1.3")
   .runCmd("pwd")
   .makeDir(`/home/user/${WORKSPACE_DIR_NAME}`)
-  .runCmd("sudo apt install -y git")
+  .runCmd("sudo apt install -y git curl")
+  .runCmd("curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg")
+  .runCmd("echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main' | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null")
+  .runCmd("sudo apt update && sudo apt install -y gh")
   .skipCache()
   .gitClone(cloneUrl, "/home/user/app", {
     branch: GITHUB_BRANCH,

@@ -14,7 +14,7 @@ const requiredEnvVars = [
   "E2B_API_KEY",
   "KAPSO_API_KEY",
   "PHONE_NUMBER_ID",
-  "GITHUB_REPO",
+  "GITHUB_TOKEN",
 ];
 
 for (const envVar of requiredEnvVars) {
@@ -43,12 +43,6 @@ app.use(
   })
 );
 
-// Log all requests
-app.use((req, _res, next) => {
-  console.log(`${req.method} ${req.path}`);
-  next();
-});
-
 // Health check endpoint
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -67,8 +61,6 @@ app.post("/webhook", (req, res) => {
       return;
     }
   }
-
-  console.log("Webhook received:", JSON.stringify(req.body, null, 2));
 
   // Respond immediately - process async
   res.status(200).json({ status: "received" });
