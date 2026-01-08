@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://docs.kapso.ai/logo/light.png" alt="Kapso" height="40">
+  <img src="https://cdn.jsdelivr.net/gh/gokapso/claude-code-whatsapp@master/assets/kapso-logo.png" alt="Kapso" height="40">
 </p>
 
 <h1 align="center">Claude Code on WhatsApp</h1>
