@@ -11,8 +11,15 @@ import {
 } from "./const";
 
 // GitHub repo to clone (should contain this e2b-server code)
-const GITHUB_REPO = process.env.E2B_SOURCE_REPO || "kapso-ai/claude-code-whatsapp";
-const GITHUB_BRANCH = process.env.E2B_SOURCE_BRANCH || "main";
+const GITHUB_REPO = process.env.E2B_SOURCE_REPO || "gokapso/claude-code-whatsapp";
+const GITHUB_BRANCH = process.env.E2B_SOURCE_BRANCH || "master";
+const GITHUB_TOKEN = process.env.E2B_GITHUB_TOKEN; // Required for private repos
+
+// Build clone URL (with token for private repos)
+// Fine-grained PATs need x-access-token format
+const cloneUrl = GITHUB_TOKEN
+  ? `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git`
+  : `https://github.com/${GITHUB_REPO}.git`;
 
 const template = Template()
   .fromBunImage("1.3")
@@ -20,7 +27,7 @@ const template = Template()
   .makeDir(`/home/user/${WORKSPACE_DIR_NAME}`)
   .runCmd("sudo apt install -y git")
   .skipCache()
-  .gitClone(`https://github.com/${GITHUB_REPO}`, "/home/user/app", {
+  .gitClone(cloneUrl, "/home/user/app", {
     branch: GITHUB_BRANCH,
   })
   .setWorkdir("/home/user/app/e2b-server")
