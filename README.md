@@ -1,11 +1,14 @@
 <p align="center">
-  <img src="https://cdn.jsdelivr.net/gh/gokapso/claude-code-whatsapp@master/assets/kapso-logo.png" alt="Kapso" height="40">
+  <img src="https://cdn.jsdelivr.net/gh/gokapso/claude-code-whatsapp@master/assets/claude-code-whatsapp.png" alt="Claude Code WhatsApp">
 </p>
 
 <h1 align="center">Claude Code on WhatsApp</h1>
 
 <p align="center">
-  Run Claude Code via WhatsApp. Each user gets an isolated E2B sandbox where Claude can read, write, edit files and run commands on your GitHub repositories.
+  Run Claude Code via WhatsApp.
+</p>
+<p align="center">
+  Each user gets an isolated E2B sandbox where Claude can read, write, edit files and run commands on your GitHub repositories.
 </p>
 
 <p align="center">
@@ -15,6 +18,16 @@
 </p>
 
 ---
+
+## Features
+
+- Isolated E2B sandboxes per user
+- Clone and work on GitHub repositories
+- Claude can read, write, edit files and run commands
+- Each session creates its own branch (isolated, cannot switch branches)
+- Create pull requests from session branch
+- Session pause/resume (30 min inactivity timeout)
+- WhatsApp commands: `/info`, `/reset`, `/compact`, `/clear`, `/status`, `/help`
 
 ## Required accounts
 
